@@ -1302,6 +1302,8 @@ impl GDriveCopierApp {
 
     fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
         let ready = self.config.api_key.is_some();
+        let busy = self.is_busy();
+        let can_reload = ready && !busy && !self.breadcrumbs.is_empty();
         ui.allocate_ui_with_layout(
             vec2(ui.available_width(), 30.0),
             Layout::right_to_left(Align::Center),
@@ -1314,6 +1316,16 @@ impl GDriveCopierApp {
                 }
                 self.draw_account_status(ui);
                 if ready {
+                    // Nút tải lại chuyển từ hàng đường dẫn (nay đã gộp vào
+                    // tiêu đề bảng, xem `draw_table_header`) lên đây, nằm
+                    // giữa "Mở" và cụm tài khoản.
+                    if ui
+                        .add_enabled(can_reload, egui::Button::new("⟳"))
+                        .on_hover_text("Tải lại thư mục này")
+                        .clicked()
+                    {
+                        self.reload_current();
+                    }
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                         self.draw_link_input(ui);
                     });
@@ -1486,91 +1498,28 @@ impl GDriveCopierApp {
     // ------------------------------------------------------------------
 
     fn draw_browser(&mut self, ui: &mut egui::Ui) {
-        // Ghim đường dẫn ở TRÊN CÙNG và hàng thông báo+nút hành động ở SÁT
-        // TRÊN thanh dưới cùng bằng 2 Panel lồng — phần còn lại (giữa) mới
-        // là chỗ của xác nhận xóa/bảng file, xem `draw_action_row`.
-        // `.show_separator_line(false)` vì đây vốn không phải ranh giới
-        // điều hướng riêng, chỉ là 1 hàng trong cùng khu vực nội dung.
-        egui::Panel::top("browser_path_bar")
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                self.draw_path_bar(ui);
-            });
+        // Hàng đường dẫn riêng đã bỏ hẳn — breadcrumb + nút "Lên" giờ gộp
+        // thẳng vào hàng tiêu đề bảng (xem `draw_table_header`, gọi từ
+        // `draw_file_table`), nên LUÔN hiện kể cả khi thư mục đang mở rỗng.
+        // Hàng thông báo + nút hành động vẫn ghim SÁT TRÊN thanh dưới cùng
+        // (xem `draw_action_row`). `.show_separator_line(false)` vì đây vốn
+        // không phải ranh giới điều hướng riêng, chỉ là 1 hàng trong cùng
+        // khu vực nội dung.
         egui::Panel::bottom("browser_action_row")
             .show_separator_line(false)
             .show(ui, |ui| {
                 self.draw_action_row(ui);
             });
         self.draw_delete_confirm(ui);
-        if self.current_entries.is_empty() {
+        // Chỉ còn dùng màn hình trống (dán link / đang tải lần đầu) khi
+        // CHƯA từng mở thư mục nào — 1 thư mục đã mở nhưng rỗng thì vẫn
+        // hiện bảng (với tiêu đề + breadcrumb), xem nhánh `n == 0` trong
+        // `draw_file_table`.
+        if self.breadcrumbs.is_empty() {
             self.draw_empty_state(ui);
             return;
         }
         self.draw_file_table(ui);
-    }
-
-    /// ⬆ lên thư mục cha, ⟳ tải lại, breadcrumb (bấm vào để quay lại, tự
-    /// xuống dòng nếu quá dài) bên trái — số lượng mục ghim cố định ở góc
-    /// phải cùng hàng này (nút Tải xuống/Xóa cho phần đã chọn nằm ở hàng
-    /// riêng sát trên thanh dưới cùng, xem `draw_action_row`).
-    fn draw_path_bar(&mut self, ui: &mut egui::Ui) {
-        let busy = self.is_busy();
-        let can_up = !busy && self.breadcrumbs.len() >= 2;
-        let can_reload = !busy && !self.breadcrumbs.is_empty();
-        let loading = matches!(self.job, JobState::Loading);
-        let mut go_to: Option<usize> = None;
-        let mut go_up = false;
-        let mut reload = false;
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if !self.breadcrumbs.is_empty() {
-                ui.weak(format!("{} mục", self.current_entries.len()));
-            }
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(can_up, egui::Button::new("⬆"))
-                        .on_hover_text("Lên thư mục cha")
-                        .clicked()
-                    {
-                        go_up = true;
-                    }
-                    if ui
-                        .add_enabled(can_reload, egui::Button::new("⟳"))
-                        .on_hover_text("Tải lại thư mục này")
-                        .clicked()
-                    {
-                        reload = true;
-                    }
-                    if self.breadcrumbs.is_empty() {
-                        ui.weak("Chưa mở thư mục nào");
-                    }
-                    let last_idx = self.breadcrumbs.len().saturating_sub(1);
-                    for (i, (_, name)) in self.breadcrumbs.iter().enumerate() {
-                        if i > 0 {
-                            ui.weak("›");
-                        }
-                        if i == last_idx {
-                            ui.strong(name);
-                        } else if ui
-                            .add_enabled(!busy, egui::Link::new(name.as_str()))
-                            .clicked()
-                        {
-                            go_to = Some(i);
-                        }
-                    }
-                    if loading {
-                        ui.spinner();
-                    }
-                });
-            });
-        });
-        if go_up {
-            self.go_up();
-        } else if reload {
-            self.reload_current();
-        } else if let Some(i) = go_to {
-            self.navigate_to_breadcrumb(i);
-        }
     }
 
     /// Thông báo trạng thái (thành công/lỗi) đặt ngay phía trên danh sách
@@ -1672,12 +1621,11 @@ impl GDriveCopierApp {
             if loading {
                 ui.spinner();
                 ui.label("Đang tải danh sách...");
-            } else if self.breadcrumbs.is_empty() {
+            } else {
+                // Chỉ gọi khi CHƯA từng mở thư mục nào (`breadcrumbs` rỗng);
+                // thư mục đã mở nhưng rỗng thì xem `draw_file_table`.
                 ui.label(RichText::new("📂").size(40.0));
                 ui.label("Dán link một thư mục Google Drive công khai lên thanh trên rồi bấm \"Mở\".");
-            } else {
-                ui.label(RichText::new("📂").size(40.0));
-                ui.label("Thư mục này trống.");
             }
         });
     }
@@ -1689,8 +1637,8 @@ impl GDriveCopierApp {
     /// Tải xuống/Xóa cho các mục đã chọn (ghim bên phải), đặt sát trên
     /// thanh Bottom Bar — xem `draw_browser`. Số lượng/dung lượng đã chọn
     /// giờ chỉ còn trong ngoặc trên nhãn nút + tooltip, không chiếm thêm 1
-    /// dòng riêng như trước (dòng đếm tổng số mục đã chuyển lên
-    /// `draw_path_bar`).
+    /// dòng riêng như trước (dòng đếm tổng số mục đã chuyển vào hàng tiêu
+    /// đề bảng, xem `draw_table_header`).
     fn draw_action_row(&mut self, ui: &mut egui::Ui) {
         let busy = self.is_busy();
         let logged_in = self.is_logged_in();
@@ -1773,9 +1721,18 @@ impl GDriveCopierApp {
     /// thấy). Mọi thao tác của người dùng được gom vào `TableActions` rồi
     /// mới áp lên `self` SAU KHI vẽ xong (tránh vay mượn `self` trong
     /// closure của `show_rows`).
+    ///
+    /// Hàng tiêu đề (nay gộp cả breadcrumb + tổng số mục, xem
+    /// `draw_table_header`) LUÔN vẽ, kể cả khi thư mục đang mở rỗng hoặc
+    /// đang tải, để nút "Lên"/breadcrumb không bao giờ biến mất giữa
+    /// chừng — chỉ phần danh sách bên dưới đổi giữa spinner/thông báo
+    /// trống/các dòng file tuỳ trạng thái.
     fn draw_file_table(&mut self, ui: &mut egui::Ui) {
-        let env_can_download = !self.is_busy();
+        let busy = self.is_busy();
+        let env_can_download = !busy;
         let env_logged_in = self.is_logged_in();
+        let can_up = !busy && self.breadcrumbs.len() >= 2;
+        let loading = matches!(self.job, JobState::Loading);
         let n = self.current_entries.len();
         let selected_in_list = self
             .current_entries
@@ -1795,6 +1752,13 @@ impl GDriveCopierApp {
 
         {
             let entries = &self.current_entries;
+            let breadcrumbs = &self.breadcrumbs;
+            let bc = BreadcrumbEnv {
+                breadcrumbs,
+                can_up,
+                busy,
+                loading,
+            };
             let env = RowEnv {
                 selected: &self.selected,
                 folder_sizes: &self.folder_sizes,
@@ -1809,7 +1773,20 @@ impl GDriveCopierApp {
                 // vị trí dòng theo chiều cao cố định + khoảng hở này, còn
                 // các dòng tự tô nền kẻ sọc nên cần liền khít nhau.
                 ui.spacing_mut().item_spacing.y = 0.0;
-                draw_table_header(ui, all_selected, partially_selected, &mut actions);
+                draw_table_header(ui, all_selected, partially_selected, n, &bc, &mut actions);
+                if n == 0 {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(40.0);
+                        if loading {
+                            ui.spinner();
+                            ui.label("Đang tải danh sách...");
+                        } else {
+                            ui.label(RichText::new("📂").size(32.0));
+                            ui.label("Thư mục này trống.");
+                        }
+                    });
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .id_salt(("file_list", list_id))
                     .auto_shrink([false, false])
@@ -1830,14 +1807,11 @@ impl GDriveCopierApp {
         }
 
         // --- Áp mọi thay đổi vào self SAU KHI vẽ xong.
-        if let Some(select_all) = actions.toggle_select_all {
-            if select_all {
-                for e in &self.current_entries {
-                    self.selected.insert(e.id.clone());
-                }
-            } else {
-                self.selected.clear();
-            }
+        if actions.go_up {
+            self.go_up();
+        }
+        if let Some(i) = actions.navigate_to_breadcrumb {
+            self.navigate_to_breadcrumb(i);
         }
         if actions.invert_selection {
             let mut inverted = HashSet::new();
@@ -2335,8 +2309,13 @@ const ACCENT: Color32 = Color32::from_rgb(45, 108, 223);
 /// Chiều cao 1 dòng trong bảng file — CỐ ĐỊNH để `ScrollArea::show_rows` chỉ
 /// vẽ đúng các dòng đang nhìn thấy (thư mục vài nghìn file vẫn mượt).
 const ROW_H: f32 = 26.0;
-const COL_CHECK_W: f32 = 90.0;
-const COL_SIZE_W: f32 = 150.0;
+// Cột tick chọn giờ chỉ còn 1 checkbox (logic Đảo đã gộp thẳng vào nó, xem
+// `draw_table_header`), không cần chừa chỗ cho nút "Đảo" riêng nữa — trả về
+// độ rộng hẹp ban đầu, nhường thêm chỗ cho cột Tên chứa breadcrumb. Cột
+// dung lượng rộng thêm 1 chút để "N mục" + "Dung lượng" (kể cả số 4 chữ
+// số) không bị chật ở hàng tiêu đề.
+const COL_CHECK_W: f32 = 30.0;
+const COL_SIZE_W: f32 = 170.0;
 const COL_ACTIONS_W: f32 = 118.0;
 const COL_GAP: f32 = 8.0;
 const PAD_LEFT: f32 = 8.0;
@@ -2393,6 +2372,14 @@ fn cell<R>(
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
+    // Kẹp nội dung trong đúng biên của ô — breadcrumb ở hàng tiêu đề giờ có
+    // thể dài (nhiều cấp thư mục lồng nhau), phòng khi tràn chữ thì bị cắt
+    // gọn thay vì đè lên cột bên cạnh.
+    // QUAN TRỌNG: GIAO với clip của Ui cha, KHÔNG gán đè — gán đè sẽ làm nội
+    // dung các dòng nằm ngoài vùng nhìn thấy của ScrollArea (`show_rows` luôn
+    // vẽ dư 1-2 dòng ở mép) vẫn bị vẽ tràn ra ngoài, đè lên hàng thông báo /
+    // thanh dưới cùng.
+    child.set_clip_rect(rect.intersect(ui.clip_rect()));
     add_contents(&mut child)
 }
 
@@ -2435,12 +2422,25 @@ struct TableActions {
     compute_size_for: Option<String>,
     /// (vị trí trong danh sách, có giữ Shift không, trạng thái tick mới)
     selection_change: Option<(usize, bool, bool)>,
-    toggle_select_all: Option<bool>,
     start_rename_for: Option<(String, String)>,
     rename_confirmed: Option<(String, String)>,
     rename_cancelled: bool,
     delete_clicked: Option<DriveEntry>,
     invert_selection: bool,
+    /// Bấm nút "Lên" (breadcrumb giờ nằm ngay trong hàng tiêu đề bảng).
+    go_up: bool,
+    /// Bấm vào 1 mắt breadcrumb — vị trí trong `self.breadcrumbs`.
+    navigate_to_breadcrumb: Option<usize>,
+}
+
+/// Dữ liệu breadcrumb chỉ-đọc cho hàng tiêu đề bảng — đường dẫn thư mục
+/// hiện đã gộp thẳng vào đây thay vì có 1 hàng riêng phía trên (xem
+/// `draw_file_table`, `draw_browser`).
+struct BreadcrumbEnv<'a> {
+    breadcrumbs: &'a [(String, String)],
+    can_up: bool,
+    busy: bool,
+    loading: bool,
 }
 
 /// Dữ liệu chỉ-đọc dùng chung cho mọi dòng của bảng.
@@ -2451,10 +2451,18 @@ struct RowEnv<'a> {
     logged_in: bool,
 }
 
+/// Hàng tiêu đề bảng — gộp CẢ breadcrumb (cột Tên) lẫn tổng số mục (cột
+/// Dung lượng) vào đây, thay cho 1 hàng đường dẫn riêng phía trên trước
+/// đó. Checkbox ở cột tick chọn mang thẳng logic Đảo (bỏ chọn mục đang
+/// chọn, chọn mục còn lại) — không còn nút "Đảo" tách riêng, vì đảo từ 2
+/// trạng thái biên (chọn hết / chưa chọn gì) đã cho đúng kết quả của
+/// chọn-tất-cả / bỏ-chọn-tất-cả rồi.
 fn draw_table_header(
     ui: &mut egui::Ui,
     all_selected: bool,
     partially_selected: bool,
+    total_count: usize,
+    bc: &BreadcrumbEnv,
     actions: &mut TableActions,
 ) {
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
@@ -2466,23 +2474,42 @@ fn draw_table_header(
         let mut master = all_selected;
         let resp = ui.add(egui::Checkbox::without_text(&mut master).indeterminate(partially_selected));
         if resp.changed() {
-            // Đang chọn dở (indeterminate) mà bấm -> bỏ chọn hết, giống Gmail.
-            actions.toggle_select_all = Some(master && !partially_selected);
-        }
-        resp.on_hover_text("Chọn tất cả / bỏ chọn tất cả");
-        if ui
-            .small_button("Đảo")
-            .on_hover_text("Đảo ngược lựa chọn hiện tại: bỏ chọn mục đang chọn, chọn mục còn lại")
-            .clicked()
-        {
             actions.invert_selection = true;
         }
+        resp.on_hover_text("Đảo ngược lựa chọn hiện tại: bỏ chọn mục đang chọn, chọn mục còn lại");
     });
     cell(ui, cols.name, Layout::left_to_right(Align::Center), |ui| {
-        ui.label(RichText::new("Tên").weak().small());
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(bc.can_up, egui::Button::new("⬆"))
+                .on_hover_text("Lên thư mục cha")
+                .clicked()
+            {
+                actions.go_up = true;
+            }
+            let last_idx = bc.breadcrumbs.len().saturating_sub(1);
+            for (i, (_, name)) in bc.breadcrumbs.iter().enumerate() {
+                if i > 0 {
+                    ui.weak("›");
+                }
+                if i == last_idx {
+                    ui.strong(name);
+                } else if ui
+                    .add_enabled(!bc.busy, egui::Link::new(name.as_str()))
+                    .clicked()
+                {
+                    actions.navigate_to_breadcrumb = Some(i);
+                }
+            }
+            if bc.loading {
+                ui.spinner();
+            }
+        });
     });
     cell(ui, cols.size, Layout::right_to_left(Align::Center), |ui| {
         ui.label(RichText::new("Dung lượng").weak().small());
+        ui.add_space(6.0);
+        ui.label(RichText::new(format!("{total_count} mục")).weak().small());
     });
 }
 
